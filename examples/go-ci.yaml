@@ -25,4 +25,4 @@ jobs:
       tag: ${{ needs.build-and-push.outputs.image-tag }}
       kustomize-path: "my-go-app/deployment/kubernetes/overlays/production/kustomization.yaml"
     secrets:
-      git_token: ${{ secrets.PAT_TOKEN }}
+      GIT_TOKEN: ${{ secrets.PAT_TOKEN }}

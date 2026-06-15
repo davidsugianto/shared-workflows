@@ -16,7 +16,7 @@ on:
         required: true
         type: string
     secrets:
-      git_token:
+      GIT_TOKEN:
         description: GitHub token with write access to the repo and PRs
         required: true
 
@@ -34,7 +34,7 @@ jobs:
           # If triggered by a PR, we need to checkout the PR branch to push changes
           ref: ${{ github.head_ref || github.ref_name }}
           # Pass the token here so git is automatically authenticated for pushes
-          token: ${{ secrets.git_token }}
+          token: ${{ secrets.GIT_TOKEN }}
 
       - name: Setup Kustomize
         uses: imranismail/setup-kustomize@v2
