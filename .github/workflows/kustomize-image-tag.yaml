@@ -1,0 +1,67 @@
+name: Kustomize Image Tag Update
+
+on:  
+  workflow_call:
+    inputs:
+      image:
+        description: Image name to update in Kustomize
+        required: true
+        type: string
+      tag:
+        description: New tag to use for the image
+        required: true
+        type: string
+      kustomize-path:
+        description: Path to the kustomization.yaml file
+        required: true
+        type: string
+    secrets:
+      git_token:
+        description: GitHub token with write access to the repo and PRs
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  update-image-tag:
+    name: Update image tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # If triggered by a PR, we need to checkout the PR branch to push changes
+          ref: ${{ github.head_ref || github.ref_name }}
+          # Pass the token here so git is automatically authenticated for pushes
+          token: ${{ secrets.git_token }}
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: "5.0.0"
+
+      - name: Change image tag in kustomization.yaml
+        working-directory: ${{ inputs.kustomize-path }}
+        env:
+          INPUT_IMAGE: ${{ inputs.image }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          image_name="$(printf '%s' "$INPUT_IMAGE" | tr '[:upper:]' '[:lower:]')"
+          kustomize edit set image "${image_name}:${INPUT_TAG}"
+          cat kustomization.yaml
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ inputs.kustomize-path }}/kustomization.yaml
+          
+          # Only commit and push if there are changes
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update image tag to ${{ inputs.tag }}"
+            # Git is already authenticated by the checkout action
+            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          else
+            echo "No changes to commit."
+          fi

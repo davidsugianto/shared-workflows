@@ -1,6 +1,5 @@
-name: Go CI Pipeline
+name: Go Docker CI Pipeline
 
-# 1. Trigger: workflow_call makes this a reusable workflow
 on:
   workflow_call:
     inputs:
@@ -25,15 +24,15 @@ on:
       DOCKERHUB_TOKEN:
         description: "Docker Hub access token"
         required: true
+    outputs:
+      image-tag:
+        description: "The image tag that was built and pushed"
+        value: ${{ jobs.build-and-push.outputs.version }}
 
-# 2. Security: Principle of Least Privilege
 permissions:
   contents: read
 
 jobs:
-  # ---------------------------------------------------------
-  # JOB 1: Shift-Left Validation
-  # ---------------------------------------------------------
   test:
     name: Run Go Tests
     if: ${{ inputs.run-tests }}
@@ -51,17 +50,13 @@ jobs:
       - name: Run Go Tests
         run: go test -v ./...
 
-  # ---------------------------------------------------------
-  # JOB 2: Build & Push (Gated by Job 1)
-  # ---------------------------------------------------------
   build-and-push:
     name: Build & Push Docker Image
     needs: test
-    # If tests are skipped, we still want to build.
-    # The 'always()' or checking the result of 'test' handles this.
     if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -96,3 +91,5 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      
+      
