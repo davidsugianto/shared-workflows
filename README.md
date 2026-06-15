@@ -75,7 +75,8 @@ jobs:
     with:
       image: "docker.io/my-dockerhub-username/my-go-app"
       tag: ${{ needs.build-and-push.outputs.image-tag }}
-      kustomize-path: "my-go-app/deployment/kubernetes/overlays/production/kustomization.yaml"
+      # Point to the directory containing kustomization.yaml, not the file itself
+      kustomize-path: "my-go-app/deployment/kubernetes/overlays/production"
     secrets:
       # Use a PAT to allow the resulting commit to trigger other workflows
       GIT_TOKEN: ${{ secrets.PAT_TOKEN }}
