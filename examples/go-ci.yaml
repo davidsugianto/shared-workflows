@@ -24,6 +24,6 @@ jobs:
       image: "docker.io/my-dockerhub-username/my-go-app"
       tag: ${{ needs.build-and-push.outputs.image-tag }}
       # kustomize-path should point to the directory, not the file itself
-      kustomize-path: "my-go-app/deployment/kubernetes/overlays/production"
+      kustomize-path: "deployment/kubernetes/overlays/production"
     secrets:
       GIT_TOKEN: ${{ secrets.PAT_TOKEN }}

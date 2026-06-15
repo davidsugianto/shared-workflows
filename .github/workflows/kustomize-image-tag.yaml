@@ -42,7 +42,7 @@ jobs:
           kustomize-version: "5.0.0"
 
       - name: Change image tag in kustomization.yaml
-        working-directory: ${{ inputs.kustomize-path }}
+        working-directory: ${{ github.workspace }}/${{ inputs.kustomize-path }}
         env:
           INPUT_IMAGE: ${{ inputs.image }}
           INPUT_TAG: ${{ inputs.tag }}
