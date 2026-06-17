@@ -11,7 +11,7 @@ on:
         description: 'GitOps repository branch'
         required: false
         type: string
-        default: 'main'
+        default: 'master'
       environment:
         description: 'Environment to validate (dev/staging/prod) or "all"'
         required: false
