@@ -32,14 +32,16 @@ A reusable workflow that checks out your code, uses Kustomize to update the imag
 #### Inputs
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
+| `gitops-repo` | string | No | The target GitOps repository (e.g., `owner/repo`). If not provided, it runs against the current repository. |
 | `image` | string | **Yes** | Image name to update in Kustomize |
 | `tag` | string | **Yes** | New tag to use for the image (usually provided by the CI job) |
 | `kustomize-path` | string | **Yes** | Path to the directory containing the `kustomization.yaml` file |
+| `create-pr` | boolean | No | Whether to create a Pull Request instead of pushing directly to the target branch. |
 
 #### Secrets
 | Name | Required | Description |
 |------|----------|-------------|
-| `GIT_TOKEN` | **Yes** | GitHub token with write access to the repo. **Highly recommended to use a Personal Access Token (PAT)** rather than the default `GITHUB_TOKEN` so the commit can trigger downstream actions (like deployment workflows). |
+| `git-token` | **Yes** | GitHub token with write access to the repo. **Highly recommended to use a Personal Access Token (PAT)** rather than the default `GITHUB_TOKEN` so the commit can trigger downstream actions (like deployment workflows) and access external GitOps repositories. |
 
 ---
 
@@ -48,36 +50,79 @@ A reusable workflow that checks out your code, uses Kustomize to update the imag
 See the full end-to-end example in [`examples/go-ci.yaml`](examples/go-ci.yaml).
 
 ```yaml
-name: Example Go Docker CI
+# Example CI pipeline in application repository
+# .github/workflows/ci.yaml
+
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ "master", "main" ]
-
+    branches:
+      - master
+      - main
+      - 'release/**'
+    tags:
+      - 'v*.*.*'
   pull_request:
-    branches: [ "master", "main" ]
+    branches:
+      - master
+      - main
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ github.repository }}
+  GITOPS_REPO: davidsugianto/idp-gitops-manifests
+  SERVICE_NAME: go-http-server
 
 jobs:
+  # Build and push image
   build-and-push:
-    # Replace 'owner/repo' with the repository where this shared workflow is hosted
-    uses: owner/repo/.github/workflows/go-docker-ci.yaml@master
+    uses: davidsugianto/shared-workflows/.github/workflows/go-docker-ci.yaml@master
     with:
       go-version: "1.25"
-      image-name: "docker.io/my-dockerhub-username/my-go-app"
+      image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
       run-tests: true
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  update-image-tag:
+  # Deploy to DEV
+  deploy-dev:
     needs: build-and-push
-    uses: owner/repo/.github/workflows/kustomize-image-tag.yaml@master
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    uses: davidsugianto/shared-workflows/.github/workflows/kustomize-image-tag.yaml@master
     with:
-      image: "docker.io/my-dockerhub-username/my-go-app"
-      tag: ${{ needs.build-and-push.outputs.image-tag }}
-      # Point to the directory containing kustomization.yaml, not the file itself
-      kustomize-path: "my-go-app/deployment/kubernetes/overlays/production"
+      gitops-repo: ${{ env.GITOPS_REPO }}
+      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      tag: dev-latest
+      kustomize-path: environments/dev/${{ env.SERVICE_NAME }}
     secrets:
-      # Use a PAT to allow the resulting commit to trigger other workflows
-      GIT_TOKEN: ${{ secrets.PAT_TOKEN }}
-```
+      git-token: ${{ secrets.GITOPS_PAT }}
+
+  # Deploy to STAGING
+  deploy-staging:
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/heads/release/')
+    uses: davidsugianto/shared-workflows/.github/workflows/kustomize-image-tag.yaml@master
+    with:
+      gitops-repo: ${{ env.GITOPS_REPO }}
+      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      tag: staging-latest
+      kustomize-path: environments/staging/${{ env.SERVICE_NAME }}
+      create-pr: true  # Create PR for staging
+    secrets:
+      git-token: ${{ secrets.GITOPS_PAT }}
+
+  # Deploy to PRODUCTION
+  deploy-prod:
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: davidsugianto/shared-workflows/.github/workflows/kustomize-image-tag.yaml@master
+    with:
+      gitops-repo: ${{ env.GITOPS_REPO }}
+      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      tag: ${{ github.ref_name }}
+      kustomize-path: environments/prod/${{ env.SERVICE_NAME }}
+      create-pr: true  # Create PR for production
+    secrets:
+      git-token: ${{ secrets.GITOPS_PAT }}

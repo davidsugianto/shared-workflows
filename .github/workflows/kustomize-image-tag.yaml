@@ -1,67 +1,366 @@
-name: Kustomize Image Tag Update
+name: Update Kustomize Image Tag
 
-on:  
+on:
   workflow_call:
     inputs:
+      gitops-repo:
+        description: 'GitOps repository (format: owner/repo)'
+        required: true
+        type: string
+      gitops-branch:
+        description: 'GitOps repository branch'
+        required: false
+        type: string
+        default: 'main'
       image:
-        description: Image name to update in Kustomize
+        description: 'Full image name (e.g., ghcr.io/owner/app)'
         required: true
         type: string
       tag:
-        description: New tag to use for the image
+        description: 'Image tag to set (e.g., v1.2.3, dev-latest)'
         required: true
         type: string
       kustomize-path:
-        description: Path to the kustomization.yaml file
+        description: 'Path to kustomization directory (e.g., environments/dev/my-app)'
         required: true
         type: string
+      commit-message:
+        description: 'Custom commit message (optional)'
+        required: false
+        type: string
+        default: ''
+      create-pr:
+        description: 'Create Pull Request instead of direct push'
+        required: false
+        type: boolean
+        default: false
+      pr-base-branch:
+        description: 'Base branch for PR (if create-pr is true)'
+        required: false
+        type: string
+        default: 'main'
+      dry-run:
+        description: 'Dry run mode (no commit/push)'
+        required: false
+        type: boolean
+        default: false
     secrets:
-      GIT_TOKEN:
-        description: GitHub token with write access to the repo and PRs
+      git-token:
+        description: 'GitHub token with repo access to GitOps repository'
         required: true
-
-permissions:
-  contents: write
+    outputs:
+      commit-sha:
+        description: 'Commit SHA of the update'
+        value: ${{ jobs.update-tag.outputs.commit-sha }}
+      pr-url:
+        description: 'Pull Request URL (if create-pr is true)'
+        value: ${{ jobs.update-tag.outputs.pr-url }}
+      changed:
+        description: 'Whether the tag was actually changed'
+        value: ${{ jobs.update-tag.outputs.changed }}
 
 jobs:
-  update-image-tag:
-    name: Update image tag
+  update-tag:
+    name: Update Image Tag
     runs-on: ubuntu-latest
+    outputs:
+      commit-sha: ${{ steps.commit.outputs.commit-sha }}
+      pr-url: ${{ steps.pr.outputs.pr-url }}
+      changed: ${{ steps.check-change.outputs.changed }}
+    
     steps:
-      - name: Checkout code
+      - name: Validate inputs
+        run: |
+          echo "🔍 Validating inputs..."
+          
+          # Validate gitops-repo format
+          if [[ ! "${{ inputs.gitops-repo }}" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$ ]]; then
+            echo "❌ Invalid gitops-repo format: ${{ inputs.gitops-repo }}"
+            echo "Expected format: owner/repo"
+            exit 1
+          fi
+          
+          # Validate image format
+          if [[ ! "${{ inputs.image }}" =~ ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$ ]] && [[ ! "${{ inputs.image }}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "⚠️  Warning: Image format might be invalid: ${{ inputs.image }}"
+          fi
+          
+          # Validate tag
+          if [[ -z "${{ inputs.tag }}" ]]; then
+            echo "❌ Image tag cannot be empty"
+            exit 1
+          fi
+          
+          echo "✅ All inputs validated"
+          echo "  Repository: ${{ inputs.gitops-repo }}"
+          echo "  Branch: ${{ inputs.gitops-branch }}"
+          echo "  Image: ${{ inputs.image }}"
+          echo "  Tag: ${{ inputs.tag }}"
+          echo "  Path: ${{ inputs.kustomize-path }}"
+
+      - name: Checkout GitOps repository
         uses: actions/checkout@v4
         with:
-          # If triggered by a PR, we need to checkout the PR branch to push changes
-          ref: ${{ github.head_ref || github.ref_name }}
-          # Pass the token here so git is automatically authenticated for pushes
-          token: ${{ secrets.GIT_TOKEN }}
+          repository: ${{ inputs.gitops-repo }}
+          ref: ${{ inputs.gitops-branch }}
+          token: ${{ secrets.git-token }}
+          path: gitops
+          fetch-depth: 0
 
       - name: Setup Kustomize
         uses: imranismail/setup-kustomize@v2
         with:
-          kustomize-version: "5.0.0"
+          kustomize-version: '5.3.0'
 
-      - name: Change image tag in kustomization.yaml
-        working-directory: ${{ github.workspace }}/${{ inputs.kustomize-path }}
-        env:
-          INPUT_IMAGE: ${{ inputs.image }}
-          INPUT_TAG: ${{ inputs.tag }}
+      - name: Verify kustomization directory exists
         run: |
-          image_name="$(printf '%s' "$INPUT_IMAGE" | tr '[:upper:]' '[:lower:]')"
-          kustomize edit set image "${image_name}:${INPUT_TAG}"
+          KUSTOMIZE_DIR="gitops/${{ inputs.kustomize-path }}"
+          
+          if [ ! -d "$KUSTOMIZE_DIR" ]; then
+            echo "❌ Kustomize directory not found: $KUSTOMIZE_DIR"
+            echo "Available directories in gitops/:"
+            find gitops -type d -name "kustomization.yaml" -exec dirname {} \; | sed 's/^/  /'
+            exit 1
+          fi
+          
+          if [ ! -f "$KUSTOMIZE_DIR/kustomization.yaml" ]; then
+            echo "❌ kustomization.yaml not found in: $KUSTOMIZE_DIR"
+            exit 1
+          fi
+          
+          echo "✅ Kustomize directory verified: $KUSTOMIZE_DIR"
+
+      - name: Get current image tag
+        id: current-tag
+        run: |
+          cd gitops/${{ inputs.kustomize-path }}
+          
+          # Extract current tag from kustomization.yaml
+          CURRENT_TAG=$(grep -A 5 "images:" kustomization.yaml | \
+            grep "name: ${{ inputs.image }}" -A 2 | \
+            grep "newTag:" | \
+            awk '{print $2}' | \
+            tr -d '"' || echo "not-found")
+          
+          echo "current-tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+          echo "📍 Current tag: $CURRENT_TAG"
+          echo "🎯 New tag: ${{ inputs.tag }}"
+
+      - name: Check if tag changed
+        id: check-change
+        run: |
+          if [ "${{ steps.current-tag.outputs.current-tag }}" = "${{ inputs.tag }}" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Image tag is already up to date, no changes needed"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Image tag will be updated"
+          fi
+
+      - name: Update image tag with Kustomize
+        if: steps.check-change.outputs.changed == 'true'
+        run: |
+          cd gitops/${{ inputs.kustomize-path }}
+          
+          echo "🔄 Updating image tag..."
+          echo "  Image: ${{ inputs.image }}"
+          echo "  New tag: ${{ inputs.tag }}"
+          
+          # Use kustomize edit to update the image
+          # Format: kustomize edit set image <image-name>=<image-name>:<new-tag>
+          kustomize edit set image ${{ inputs.image }}=${{ inputs.image }}:${{ inputs.tag }}
+          
+          echo "✅ Image tag updated successfully"
+          
+          # Show the updated kustomization.yaml
+          echo ""
+          echo "📄 Updated kustomization.yaml:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           cat kustomization.yaml
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: Commit and Push changes
+      - name: Validate updated manifests
+        if: steps.check-change.outputs.changed == 'true'
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          cd gitops/${{ inputs.kustomize-path }}
+          
+          echo "🔍 Validating updated manifests..."
+          
+          # Build with kustomize to ensure no syntax errors
+          if ! kustomize build . > /dev/null 2>&1; then
+            echo "❌ Kustomize build failed!"
+            echo "Error output:"
+            kustomize build . 2>&1 | sed 's/^/  /'
+            exit 1
+          fi
+          
+          # Verify the image tag in built output
+          BUILT_IMAGE=$(kustomize build . | grep "image:" | grep "${{ inputs.image }}" | head -1)
+          
+          if echo "$BUILT_IMAGE" | grep -q "${{ inputs.tag }}"; then
+            echo "✅ Validation passed: image tag correctly set to ${{ inputs.tag }}"
+          else
+            echo "❌ Validation failed: image tag not found in built manifests"
+            echo "Expected: ${{ inputs.image }}:${{ inputs.tag }}"
+            echo "Found: $BUILT_IMAGE"
+            exit 1
+          fi
+
+      - name: Configure Git
+        if: steps.check-change.outputs.changed == 'true' && inputs.dry-run == false
+        run: |
+          cd gitops
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create branch for PR
+        if: steps.check-change.outputs.changed == 'true' && inputs.create-pr == true && inputs.dry-run == false
+        run: |
+          cd gitops
+          
+          # Generate branch name
+          BRANCH_NAME="auto-update/$(echo '${{ inputs.image }}' | sed 's/[^a-zA-Z0-9]/-/g')-${{ inputs.tag }}"
+          BRANCH_NAME=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | cut -c1-50)
+          
+          echo "🌿 Creating branch: $BRANCH_NAME"
+          git checkout -b "$BRANCH_NAME"
+          echo "branch-name=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: Commit changes
+        id: commit
+        if: steps.check-change.outputs.changed == 'true' && inputs.dry-run == false
+        run: |
+          cd gitops
+          
           git add ${{ inputs.kustomize-path }}/kustomization.yaml
           
-          # Only commit and push if there are changes
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: update image tag to ${{ inputs.tag }}"
-            # Git is already authenticated by the checkout action
-            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          # Generate commit message
+          if [ -n "${{ inputs.commit-message }}" ]; then
+            COMMIT_MSG="${{ inputs.commit-message }}"
           else
-            echo "No changes to commit."
+            SERVICE_NAME=$(basename "${{ inputs.kustomize-path }}")
+            COMMIT_MSG="chore: update ${SERVICE_NAME} image to ${{ inputs.tag }}"
+            COMMIT_MSG="${COMMIT_MSG}
+
+          - Image: ${{ inputs.image }}
+          - Tag: ${{ inputs.tag }}
+          - Previous tag: ${{ steps.current-tag.outputs.current-tag }}
+          - Environment: $(echo '${{ inputs.kustomize-path }}' | cut -d'/' -f2)
+          - Triggered by: ${{ github.actor }}
+          - Workflow: ${{ github.workflow }}
+          - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
+          
+          git commit -m "$COMMIT_MSG"
+          
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "commit-sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "✅ Changes committed: $COMMIT_SHA"
+
+      - name: Push changes (direct)
+        if: steps.check-change.outputs.changed == 'true' && inputs.create-pr == false && inputs.dry-run == false
+        run: |
+          cd gitops
+          git push origin ${{ inputs.gitops-branch }}
+          echo "✅ Changes pushed to ${{ inputs.gitops-branch }}"
+
+      - name: Push branch and create PR
+        id: pr
+        if: steps.check-change.outputs.changed == 'true' && inputs.create-pr == true && inputs.dry-run == false
+        run: |
+          cd gitops
+          git push origin ${{ env.branch-name }}
+          
+          # Create PR using GitHub CLI
+          SERVICE_NAME=$(basename "${{ inputs.kustomize-path }}")
+          ENV_NAME=$(echo '${{ inputs.kustomize-path }}' | cut -d'/' -f2)
+          
+          PR_TITLE="🚀 Update ${SERVICE_NAME} to ${{ inputs.tag }} (${ENV_NAME})"
+          PR_BODY="## Automated Image Update
+          
+          ### Details
+          - **Service:** ${SERVICE_NAME}
+          - **Environment:** ${ENV_NAME}
+          - **Image:** \`${{ inputs.image }}\`
+          - **New Tag:** \`${{ inputs.tag }}\`
+          - **Previous Tag:** \`${{ steps.current-tag.outputs.current-tag }}\`
+          
+          ### Triggered By
+          - **Actor:** @${{ github.actor }}
+          - **Repository:** ${{ github.repository }}
+          - **Workflow Run:** [View](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          
+          ### Checklist
+          - [ ] Review changes
+          - [ ] Verify image exists in registry
+          - [ ] Check ArgoCD sync after merge
+          
+          ---
+          *This PR was automatically created by the CI/CD pipeline.*"
+          
+          PR_URL=$(gh pr create \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" \
+            --base ${{ inputs.pr-base-branch }} \
+            --head ${{ env.branch-name }} \
+            --label "automated,gitops,image-update")
+          
+          echo "pr-url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "✅ Pull Request created: $PR_URL"
+        env:
+          GITHUB_TOKEN: ${{ secrets.git-token }}
+
+      - name: Dry run summary
+        if: inputs.dry-run == 'true'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🏃 DRY RUN MODE - No changes were committed"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "The following changes would be made:"
+          echo "  Repository: ${{ inputs.gitops-repo }}"
+          echo "  Branch: ${{ inputs.gitops-branch }}"
+          echo "  Path: ${{ inputs.kustomize-path }}"
+          echo "  Image: ${{ inputs.image }}"
+          echo "  Current Tag: ${{ steps.current-tag.outputs.current-tag }}"
+          echo "  New Tag: ${{ inputs.tag }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: No changes summary
+        if: steps.check-change.outputs.changed == 'false'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "ℹ️  NO CHANGES NEEDED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Image tag is already up to date:"
+          echo "  Image: ${{ inputs.image }}"
+          echo "  Tag: ${{ inputs.tag }}"
+          echo "  Path: ${{ inputs.kustomize-path }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Success summary
+        if: steps.check-change.outputs.changed == 'true' && inputs.dry-run == 'false'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ IMAGE TAG UPDATE SUCCESSFUL"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Repository: ${{ inputs.gitops-repo }}"
+          echo "Branch: ${{ inputs.gitops-branch }}"
+          echo "Path: ${{ inputs.kustomize-path }}"
+          echo ""
+          echo "Image Update:"
+          echo "  Image: ${{ inputs.image }}"
+          echo "  Previous Tag: ${{ steps.current-tag.outputs.current-tag }}"
+          echo "  New Tag: ${{ inputs.tag }}"
+          echo ""
+          if [ "${{ inputs.create-pr }}" == "true" ]; then
+            echo "Pull Request: ${{ steps.pr.outputs.pr-url }}"
+          else
+            echo "Commit: ${{ steps.commit.outputs.commit-sha }}"
+          fi
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

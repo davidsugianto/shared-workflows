@@ -1,0 +1,99 @@
+name: Validate Kustomize Manifests
+
+on:
+  workflow_call:
+    inputs:
+      gitops-repo:
+        description: 'GitOps repository (format: owner/repo)'
+        required: true
+        type: string
+      gitops-branch:
+        description: 'GitOps repository branch'
+        required: false
+        type: string
+        default: 'main'
+      environment:
+        description: 'Environment to validate (dev/staging/prod) or "all"'
+        required: false
+        type: string
+        default: 'all'
+    secrets:
+      git-token:
+        description: 'GitHub token with repo access'
+        required: true
+
+jobs:
+  validate:
+    name: Validate Manifests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops-repo }}
+          ref: ${{ inputs.gitops-branch }}
+          token: ${{ secrets.git-token }}
+          path: gitops
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Setup kubeconform
+        run: |
+          wget -q https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+          tar xf kubeconform-linux-amd64.tar.gz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate manifests
+        run: |
+          cd gitops
+          
+          if [ "${{ inputs.environment }}" == "all" ]; then
+            ENV_DIRS=$(find environments -mindepth 1 -maxdepth 1 -type d)
+          else
+            ENV_DIRS="environments/${{ inputs.environment }}"
+          fi
+          
+          ERRORS=0
+          
+          for ENV_DIR in $ENV_DIRS; do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔍 Validating: $ENV_DIR"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            # Find all service directories
+            for SERVICE_DIR in $(find "$ENV_DIR" -mindepth 1 -maxdepth 1 -type d); do
+              if [ -f "$SERVICE_DIR/kustomization.yaml" ]; then
+                echo ""
+                echo "📦 Checking: $SERVICE_DIR"
+                
+                # Kustomize build
+                if ! kustomize build "$SERVICE_DIR" > /dev/null 2>&1; then
+                  echo "❌ Kustomize build failed"
+                  kustomize build "$SERVICE_DIR" 2>&1 | sed 's/^/  /'
+                  ERRORS=$((ERRORS + 1))
+                else
+                  echo "✅ Kustomize build successful"
+                fi
+                
+                # Schema validation
+                if ! kustomize build "$SERVICE_DIR" | kubeconform -strict -kubernetes-version 1.28.0 2>&1; then
+                  echo "❌ Schema validation failed"
+                  ERRORS=$((ERRORS + 1))
+                else
+                  echo "✅ Schema validation passed"
+                fi
+              fi
+            done
+          done
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if [ $ERRORS -eq 0 ]; then
+            echo "✅ All validations passed!"
+          else
+            echo "❌ $ERRORS validation(s) failed"
+            exit 1
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
