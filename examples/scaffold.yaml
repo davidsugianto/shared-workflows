@@ -1,0 +1,37 @@
+# In your app repo: .github/workflows/scaffold.yaml 
+name: Scaffold New Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitops-repo:
+        description: 'GitOps repository (format: owner/repo)'
+        required: true
+        type: string
+        default: 'davidsugianto/idp-gitops-manifests'
+      gitops-branch:
+        description: 'GitOps repository branch'
+        required: false
+        type: string
+        default: 'master'
+      service-name:
+        description: 'Service name'
+        required: true
+        type: string
+      image-registry:
+        description: 'Image registry name'
+        required: true
+        type: string
+
+jobs:
+  scaffold:
+    uses: davidsugianto/shared-workflows/.github/workflows/kustomize-scaffold.yaml@master
+    with:
+      gitops-repo: ${{ inputs.gitops-repo }}
+      gitops-branch: ${{ inputs.gitops-branch }}
+      service-name: ${{ inputs.service-name }}
+      image-registry: ${{ inputs.image-registry }}
+      environments: 'dev,staging,prod'
+      create-pr: true
+    secrets:
+      git-token: ${{ secrets.GITHUB_TOKEN }}
