@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: true
+      push-image:
+        description: "Whether to push the Docker image to registry"
+        required: false
+        type: boolean
+        default: true
     secrets:
       DOCKERHUB_USERNAME:
         description: "Docker Hub username"
@@ -27,14 +32,14 @@ on:
     outputs:
       image-tag:
         description: "The image tag that was built and pushed"
-        value: ${{ jobs.build-and-push.outputs.version }}
+        value: ${{ jobs.build.outputs.version }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Run Go Tests
+    name: Test
     if: ${{ inputs.run-tests }}
     runs-on: ubuntu-latest
     steps:
@@ -50,13 +55,51 @@ jobs:
       - name: Run Go Tests
         run: go test -v ./...
 
-  build-and-push:
-    name: Build & Push Docker Image
+  build:
+    name: Build
     needs: test
     if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image-name }}
+          tags: |
+            type=ref,event=pr
+            type=ref,event=branch
+            type=sha
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  push:
+    name: Push
+    needs: build
+    if: ${{ inputs.push-image }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -73,7 +116,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -95,5 +138,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
-      

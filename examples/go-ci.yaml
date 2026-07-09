@@ -12,62 +12,58 @@ on:
     branches:
       - master
       - main
+  workflow_dispatch:
 
-env:
-  REGISTRY: docker.io
-  IMAGE_NAME: ${{ github.repository }}
-  GITOPS_REPO: davidsugianto/idp-gitops-manifests
-  SERVICE_NAME: go-http-server
+# NOTE: env context is NOT available in reusable workflow `with` inputs.
+# Inline values directly or use the `vars` context (repository variables).
 
 jobs:
-  # Build and push image
-  build-and-push:
+  build:
     uses: davidsugianto/shared-workflows/.github/workflows/go-docker-ci.yaml@master
     with:
       go-version: "1.25"
-      image-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      image-name: docker.io/<your-dockerhub-username>/<your-service-name>
       run-tests: true
+      push-image: ${{ github.event_name != 'pull_request' }}
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  # Deploy to DEV
   deploy-dev:
-    needs: build-and-push
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    needs: build
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     uses: davidsugianto/shared-workflows/.github/workflows/kustomize-image-tag.yaml@master
     with:
-      gitops-repo: ${{ env.GITOPS_REPO }}
-      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-      tag: dev-latest
-      kustomize-path: environments/dev/${{ env.SERVICE_NAME }}
+      gitops-repo: <your-org>/<your-gitops-repo>
+      image: docker.io/<your-dockerhub-username>/<your-service-name>
+      tag: ${{ needs.build.outputs.image-tag }}
+      kustomize-path: environments/dev/<your-service-name>
+      create-pr: true
     secrets:
-      git-token: ${{ secrets.GITOPS_PAT }}
+      git-token: ${{ secrets.PAT_TOKEN }}
 
-  # Deploy to STAGING
   deploy-staging:
-    needs: build-and-push
+    needs: build
     if: startsWith(github.ref, 'refs/heads/release/')
     uses: davidsugianto/shared-workflows/.github/workflows/kustomize-image-tag.yaml@master
     with:
-      gitops-repo: ${{ env.GITOPS_REPO }}
-      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-      tag: staging-latest
-      kustomize-path: environments/staging/${{ env.SERVICE_NAME }}
-      create-pr: true  # Create PR for staging
+      gitops-repo: <your-org>/<your-gitops-repo>
+      image: docker.io/<your-dockerhub-username>/<your-service-name>
+      tag: ${{ needs.build.outputs.image-tag }}
+      kustomize-path: environments/staging/<your-service-name>
+      create-pr: true
     secrets:
-      git-token: ${{ secrets.GITOPS_PAT }}
+      git-token: ${{ secrets.PAT_TOKEN }}
 
-  # Deploy to PRODUCTION
   deploy-prod:
-    needs: build-and-push
+    needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     uses: davidsugianto/shared-workflows/.github/workflows/kustomize-image-tag.yaml@master
     with:
-      gitops-repo: ${{ env.GITOPS_REPO }}
-      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-      tag: ${{ github.ref_name }}
-      kustomize-path: environments/prod/${{ env.SERVICE_NAME }}
-      create-pr: true  # Create PR for production
+      gitops-repo: <your-org>/<your-gitops-repo>
+      image: docker.io/<your-dockerhub-username>/<your-service-name>
+      tag: ${{ needs.build.outputs.image-tag }}
+      kustomize-path: environments/prod/<your-service-name>
+      create-pr: true
     secrets:
-      git-token: ${{ secrets.GITOPS_PAT }}
+      git-token: ${{ secrets.PAT_TOKEN }}
